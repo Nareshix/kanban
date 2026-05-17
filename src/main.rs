@@ -1,28 +1,23 @@
-use eframe::egui::{
-    self, Color32, CornerRadius, Frame, Margin, RichText, ScrollArea, Sense, Stroke, Vec2,
-};
-use egui_shadcn::{
-    button, card, dialog, CardProps, CardVariant, ControlSize, ControlVariant, DialogAlign,
-    DialogProps, Input, InputSize, Label, Theme,
+use iced::border::Border;
+use iced::widget::{column, container, row, scrollable, text, Space};
+use iced::{Alignment, Background, Color, Element, Length, Subscription, Task};
+use iced_drop::droppable;
+
+use iced_shadcn::{
+    button, card, input, label, ButtonProps, ButtonSize, ButtonVariant, CardProps, CardSize,
+    CardVariant, InputProps, InputSize, InputVariant, Theme,
 };
 
-fn main() -> Result<(), eframe::Error> {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1200.0, 820.0])
-            .with_title("Kanban Board"),
-        ..Default::default()
-    };
-    eframe::run_native(
-        "Kanban",
-        options,
-        Box::new(|_| Ok(Box::new(KanbanApp::new()))),
-    )
+pub fn main() -> iced::Result {
+    iced::application(KanbanApp::default, KanbanApp::update, KanbanApp::view)
+        .title("Kanban Board - Iced") // FIXED: Passing static string directly
+        .subscription(KanbanApp::subscription)
+        .run()
 }
 
 // ── Data model ────────────────────────────────────────────────────────────────
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct KanbanCard {
     id: u64,
     title: String,
@@ -34,14 +29,6 @@ enum Col {
     Todo = 0,
     InProgress = 1,
     Done = 2,
-}
-
-fn col_color(col: Col) -> Color32 {
-    match col {
-        Col::Todo => Color32::from_rgb(34, 197, 94),
-        Col::InProgress => Color32::from_rgb(234, 179, 8),
-        Col::Done => Color32::from_rgb(139, 92, 246),
-    }
 }
 
 fn prev_col(col: Col) -> Option<Col> {
@@ -62,7 +49,7 @@ fn next_col(col: Col) -> Option<Col> {
 
 // ── Undo / Redo Architecture (Command Pattern) ─────────────────────────────────
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum Command {
     Move { id: u64, from_col: Col, to_col: Col, from_idx: usize, to_idx: usize },
     Add { col: Col, card: KanbanCard },
@@ -74,16 +61,26 @@ enum Command {
     },
 }
 
-// Operations collected during rendering, applied afterwards to avoid borrow checker
-enum Action {
+#[derive(Clone, Debug)]
+enum Message {
     OpenAdd(Col),
-    OpenEdit(u64, Col, String, String),
+    UpdateAddTitle(String),
+    UpdateAddDesc(String),
+    SubmitAdd,
 
-    AddCard { col: Col, title: String, desc: String },
-    EditCard { id: u64, col: Col, title: String, desc: String },
-    DeleteCard(u64, Col),
+    OpenEdit(u64, Col, String, String),
+    UpdateEditTitle(String),
+    UpdateEditDesc(String),
+    SubmitEdit,
+
+    CloseDialog,
+
     MoveCardCol { id: u64, from: Col, to: Col },
-    DndDrop { id: u64, from_col: Col, to_col: Col, to_idx: Option<usize> },
+    DeleteCard(u64, Col),
+
+    // Drag and drop messages
+    DragCardDropped { card_id: u64, point: iced::Point, rect: iced::Rectangle },
+    HandleDropZones { card_id: u64, zones: Vec<(iced::widget::Id, iced::Rectangle)> },
 
     Undo,
     Redo,
@@ -114,33 +111,17 @@ struct KanbanApp {
     edit_desc: String,
 }
 
-impl KanbanApp {
-    fn new() -> Self {
+impl Default for KanbanApp {
+    fn default() -> Self {
         Self {
             theme: Theme::default(),
             columns: [
                 vec![
-                    KanbanCard {
-                        id: 1,
-                        title: "Design system setup".into(),
-                        description: "Configure color tokens and typography".into(),
-                    },
-                    KanbanCard {
-                        id: 2,
-                        title: "Write unit tests".into(),
-                        description: "Cover core business logic".into(),
-                    },
+                    KanbanCard { id: 1, title: "Design system setup".into(), description: "Configure color tokens and typography".into() },
+                    KanbanCard { id: 2, title: "Write unit tests".into(), description: "Cover core business logic".into() },
                 ],
-                vec![KanbanCard {
-                    id: 3,
-                    title: "Implement auth flow".into(),
-                    description: "OAuth2 with refresh tokens".into(),
-                }],
-                vec![KanbanCard {
-                    id: 4,
-                    title: "Project scaffolding".into(),
-                    description: "Initial repo setup done".into(),
-                }],
+                vec![KanbanCard { id: 3, title: "Implement auth flow".into(), description: "OAuth2 with refresh tokens".into() }],
+                vec![KanbanCard { id: 4, title: "Project scaffolding".into(), description: "Initial repo setup done".into() }],
             ],
             next_id: 5,
             undo_stack: Vec::new(),
@@ -156,7 +137,9 @@ impl KanbanApp {
             edit_desc: String::new(),
         }
     }
+}
 
+impl KanbanApp {
     fn dispatch(&mut self, cmd: Command) {
         self.execute_command(&cmd);
         self.undo_stack.push(cmd);
@@ -168,20 +151,12 @@ impl KanbanApp {
             Command::Move { id: _, from_col, to_col, from_idx, to_idx } => {
                 let card = self.columns[*from_col as usize].remove(*from_idx);
                 let mut insert_idx = *to_idx;
-
-                if from_col == to_col && *from_idx < insert_idx {
-                    insert_idx -= 1;
-                }
-
+                if from_col == to_col && *from_idx < insert_idx { insert_idx -= 1; }
                 let insert_idx = insert_idx.min(self.columns[*to_col as usize].len());
                 self.columns[*to_col as usize].insert(insert_idx, card);
             }
-            Command::Add { col, card } => {
-                self.columns[*col as usize].push(card.clone());
-            }
-            Command::Delete { col, card: _, original_index } => {
-                self.columns[*col as usize].remove(*original_index);
-            }
+            Command::Add { col, card } => self.columns[*col as usize].push(card.clone()),
+            Command::Delete { col, original_index, .. } => { self.columns[*col as usize].remove(*original_index); }
             Command::Edit { id, col, new_title, new_desc, .. } => {
                 if let Some(c) = self.columns[*col as usize].iter_mut().find(|c| c.id == *id) {
                     c.title = new_title.clone();
@@ -193,18 +168,14 @@ impl KanbanApp {
 
     fn undo_command(&mut self, cmd: &Command) {
         match cmd {
-            Command::Move { id, from_col, to_col, from_idx, to_idx: _ } => {
+            Command::Move { id, from_col, to_col, from_idx, .. } => {
                 if let Some(current_idx) = self.columns[*to_col as usize].iter().position(|c| c.id == *id) {
                     let card = self.columns[*to_col as usize].remove(current_idx);
                     self.columns[*from_col as usize].insert(*from_idx, card);
                 }
             }
-            Command::Add { col, card } => {
-                self.columns[*col as usize].retain(|c| c.id != card.id);
-            }
-            Command::Delete { col, card, original_index } => {
-                self.columns[*col as usize].insert(*original_index, card.clone());
-            }
+            Command::Add { col, card } => self.columns[*col as usize].retain(|c| c.id != card.id),
+            Command::Delete { col, card, original_index } => self.columns[*col as usize].insert(*original_index, card.clone()),
             Command::Edit { id, col, old_title, old_desc, .. } => {
                 if let Some(c) = self.columns[*col as usize].iter_mut().find(|c| c.id == *id) {
                     c.title = old_title.clone();
@@ -214,366 +185,302 @@ impl KanbanApp {
         }
     }
 
-    fn apply(&mut self, action: Action) {
-        match action {
-            Action::OpenAdd(col) => {
+    fn update(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::OpenAdd(col) => {
                 self.add_open = true;
                 self.add_col = col;
                 self.add_title.clear();
                 self.add_desc.clear();
             }
-            Action::OpenEdit(id, col, title, desc) => {
+            Message::UpdateAddTitle(val) => self.add_title = val,
+            Message::UpdateAddDesc(val) => self.add_desc = val,
+            Message::SubmitAdd => {
+                if !self.add_title.trim().is_empty() {
+                    let card = KanbanCard { id: self.next_id, title: self.add_title.trim().to_string(), description: self.add_desc.trim().to_string() };
+                    self.next_id += 1;
+                    self.dispatch(Command::Add { col: self.add_col, card });
+                    self.add_open = false;
+                }
+            }
+            Message::OpenEdit(id, col, title, desc) => {
                 self.edit_open = true;
                 self.edit_id = id;
                 self.edit_col = col;
                 self.edit_title = title;
                 self.edit_desc = desc;
             }
-            Action::Undo => {
+            Message::UpdateEditTitle(val) => self.edit_title = val,
+            Message::UpdateEditDesc(val) => self.edit_desc = val,
+            Message::SubmitEdit => {
+                if !self.edit_title.trim().is_empty() {
+                    if let Some(idx) = self.columns[self.edit_col as usize].iter().position(|c| c.id == self.edit_id) {
+                        let old_title = self.columns[self.edit_col as usize][idx].title.clone();
+                        let old_desc = self.columns[self.edit_col as usize][idx].description.clone();
+                        self.dispatch(Command::Edit {
+                            id: self.edit_id, col: self.edit_col, old_title,
+                            new_title: self.edit_title.trim().to_string(), old_desc, new_desc: self.edit_desc.trim().to_string()
+                        });
+                    }
+                    self.edit_open = false;
+                }
+            }
+            Message::CloseDialog => {
+                self.add_open = false;
+                self.edit_open = false;
+            }
+            Message::Undo => {
                 if let Some(cmd) = self.undo_stack.pop() {
                     self.undo_command(&cmd);
                     self.redo_stack.push(cmd);
                 }
             }
-            Action::Redo => {
+            Message::Redo => {
                 if let Some(cmd) = self.redo_stack.pop() {
                     self.execute_command(&cmd);
                     self.undo_stack.push(cmd);
                 }
             }
-            Action::AddCard { col, title, desc } => {
-                let card = KanbanCard { id: self.next_id, title, description: desc };
-                self.next_id += 1;
-                self.dispatch(Command::Add { col, card });
-            }
-            Action::DeleteCard(id, col) => {
+            Message::DeleteCard(id, col) => {
                 if let Some(idx) = self.columns[col as usize].iter().position(|c| c.id == id) {
                     let card = self.columns[col as usize][idx].clone();
                     self.dispatch(Command::Delete { col, card, original_index: idx });
                 }
             }
-            Action::EditCard { id, col, title, desc } => {
-                if let Some(idx) = self.columns[col as usize].iter().position(|c| c.id == id) {
-                    let old_title = self.columns[col as usize][idx].title.clone();
-                    let old_desc = self.columns[col as usize][idx].description.clone();
-                    self.dispatch(Command::Edit {
-                        id, col, old_title, new_title: title, old_desc, new_desc: desc
-                    });
-                }
-            }
-            Action::MoveCardCol { id, from, to } => {
+            Message::MoveCardCol { id, from, to } => {
                 if let Some(from_idx) = self.columns[from as usize].iter().position(|c| c.id == id) {
                     let to_idx = self.columns[to as usize].len();
                     self.dispatch(Command::Move { id, from_col: from, to_col: to, from_idx, to_idx });
                 }
             }
-            Action::DndDrop { id, from_col, to_col, to_idx } => {
-                if let Some(from_idx) = self.columns[from_col as usize].iter().position(|c| c.id == id) {
-                    let actual_to_idx = to_idx.unwrap_or_else(|| self.columns[to_col as usize].len());
-                    self.dispatch(Command::Move { id, from_col, to_col, from_idx, to_idx: actual_to_idx });
+            // ── Drag and Drop Actions ──
+            Message::DragCardDropped { card_id, point, rect: _ } => {
+                return iced_drop::zones_on_point(
+                    move |zones| Message::HandleDropZones { card_id, zones },
+                    point,
+                    None,
+                    None,
+                );
+            }
+            Message::HandleDropZones { card_id, zones } => {
+                if let Some((zone_id, _)) = zones.first() {
+                    let target_col = if *zone_id == iced::widget::Id::new("col_todo") {
+                        Some(Col::Todo)
+                    } else if *zone_id == iced::widget::Id::new("col_inprogress") {
+                        Some(Col::InProgress)
+                    } else if *zone_id == iced::widget::Id::new("col_done") {
+                        Some(Col::Done)
+                    } else {
+                        None
+                    };
+
+                    if let Some(to) = target_col {
+                        let mut from_col = None;
+                        for col in [Col::Todo, Col::InProgress, Col::Done] {
+                            if self.columns[col as usize].iter().any(|c| c.id == card_id) {
+                                from_col = Some(col);
+                                break;
+                            }
+                        }
+
+                        if let Some(from) = from_col {
+                            let from_idx = self.columns[from as usize].iter().position(|c| c.id == card_id).unwrap();
+                            let to_idx = self.columns[to as usize].len();
+                            self.dispatch(Command::Move { id: card_id, from_col: from, to_col: to, from_idx, to_idx });
+                        }
+                    }
                 }
             }
         }
+        Task::none()
     }
-}
 
-const COL_DEFS: [(Col, &str, &str); 3] = [
-    (Col::Todo, "Todo", "This item hasn't been started"),
-    (Col::InProgress, "In Progress", "This is actively being worked on"),
-    (Col::Done, "Done", "This has been completed"),
-];
+    // Global Keybinding subscriptions for Undo/Redo
+    fn subscription(&self) -> Subscription<Message> {
+        iced::event::listen_with(|event, _status, _window| {
+            if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) = event {
+                if modifiers.command() {
+                    match key.as_ref() {
+                        iced::keyboard::Key::Character("z") => {
+                            if modifiers.shift() { return Some(Message::Redo); }
+                            else { return Some(Message::Undo); }
+                        }
+                        iced::keyboard::Key::Character("y") => { return Some(Message::Redo); }
+                        _ => {}
+                    }
+                }
+            }
+            None
+        })
+    }
 
-// ── Rendering ─────────────────────────────────────────────────────────────────
+    fn view(&self) -> Element<Message> {
+        let content = if self.add_open {
+            self.view_add_dialog()
+        } else if self.edit_open {
+            self.view_edit_dialog()
+        } else {
+            self.view_board()
+        };
 
-impl eframe::App for KanbanApp {
-    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        let mut visuals = egui::Visuals::dark();
-        // Setting the overall App background to GitHub's `#010409`
-        visuals.panel_fill = Color32::from_rgb(1, 4, 9);
-        ctx.set_visuals(visuals);
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_theme| iced::widget::container::Style {
+                background: Some(Background::Color(Color::from_rgb8(1, 4, 9))),
+                ..Default::default()
+            })
+            .into()
+    }
 
-        let theme = self.theme.clone();
-        let mut actions: Vec<Action> = Vec::new();
+    fn view_board(&self) -> Element<Message> {
+        let col_defs = [
+            (Col::Todo, "Todo", "This item hasn't been started"),
+            (Col::InProgress, "In Progress", "This is actively being worked on"),
+            (Col::Done, "Done", "This has been completed"),
+        ];
 
-        ctx.input_mut(|i| {
-            if i.consume_shortcut(&egui::KeyboardShortcut::new(
-                egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
-                egui::Key::Z,
-            )) {
-                actions.push(Action::Redo);
-            } else if i.consume_shortcut(&egui::KeyboardShortcut::new(
-                egui::Modifiers::COMMAND,
-                egui::Key::Z,
-            )) {
-                actions.push(Action::Undo);
+        let columns_ui = col_defs.iter().map(|(col_id, title, desc)| {
+            let cards = &self.columns[*col_id as usize];
+
+            // FIXED: Using ButtonSize::Size1 instead of ButtonSize::Sm
+            let mut col_content = column![
+                row![
+                    text(*title).size(15).color(Color::WHITE),
+                    Space::new().width(Length::Fixed(6.0)).height(Length::Fixed(0.0)),
+                    text(cards.len().to_string()).size(13).color(Color::from_rgb8(100, 100, 120)),
+        Space::new().width(Length::Fill).height(Length::Fixed(0.0)), // Use Fill for expansion
+                    button("+", Some(Message::OpenAdd(*col_id)), ButtonProps::new().variant(ButtonVariant::Ghost).size(ButtonSize::Size1), &self.theme)
+                ].align_y(Alignment::Center),
+                text(*desc).size(12).color(Color::from_rgb8(75, 75, 95)),
+            ].spacing(8);
+
+            let mut card_list = column![].spacing(10);
+            for kcard in cards {
+                let cid = kcard.id;
+
+                // FIXED: Using ButtonSize::Size1 instead of ButtonSize::Sm
+                let card_inner = column![
+                    text(&kcard.title).size(14).color(Color::WHITE),
+                    text(&kcard.description).size(12).color(Color::from_rgb8(100, 100, 120)),
+                    row![
+                        button("<-", prev_col(*col_id).map(|p| Message::MoveCardCol { id: cid, from: *col_id, to: p }), ButtonProps::new().variant(ButtonVariant::Ghost).size(ButtonSize::Size1), &self.theme),
+                        button("->", next_col(*col_id).map(|n| Message::MoveCardCol { id: cid, from: *col_id, to: n }), ButtonProps::new().variant(ButtonVariant::Ghost).size(ButtonSize::Size1), &self.theme),
+                        Space::new().width(Length::Fill),
+                        button("Edit", Some(Message::OpenEdit(cid, *col_id, kcard.title.clone(), kcard.description.clone())), ButtonProps::new().variant(ButtonVariant::Ghost).size(ButtonSize::Size1), &self.theme),
+                        button("X", Some(Message::DeleteCard(cid, *col_id)), ButtonProps::new().variant(ButtonVariant::Ghost).size(ButtonSize::Size1), &self.theme),
+                    ].align_y(Alignment::Center)
+                ].spacing(8);
+
+                let card_widget = card(card_inner, CardProps::new().variant(CardVariant::Surface).size(CardSize::Size2), &self.theme);
+
+                let wrapped_card = droppable(card_widget)
+                    .on_drop(move |point, rect| Message::DragCardDropped { card_id: cid, point, rect });
+
+                card_list = card_list.push(wrapped_card);
             }
 
-            if i.consume_shortcut(&egui::KeyboardShortcut::new(
-                egui::Modifiers::COMMAND,
-                egui::Key::Y,
-            )) {
-                actions.push(Action::Redo);
-            }
+            col_content = col_content.push(scrollable(card_list).height(Length::Fill));
+            col_content = col_content.push(
+                button("+ Add item", Some(Message::OpenAdd(*col_id)), ButtonProps::new().variant(ButtonVariant::Ghost).size(ButtonSize::Size1), &self.theme)
+                    .width(Length::Fill)
+            );
+
+            let col_id_string = match col_id {
+                Col::Todo => "col_todo",
+                Col::InProgress => "col_inprogress",
+                Col::Done => "col_done",
+            };
+
+            container(col_content)
+                .id(iced::widget::Id::new(col_id_string))
+                .width(Length::Fixed(340.0))
+                .height(Length::Fill)
+                .padding(18)
+                .style(|_theme| iced::widget::container::Style {
+                    background: Some(Background::Color(Color::from_rgb8(13, 17, 23))),
+                    border: Border { radius: 10.0.into(), width: 1.0, color: Color::from_rgb8(48, 54, 61) },
+                    ..Default::default()
+                })
+                .into()
         });
 
-        let mut global_drop: Option<(u64, Col, Col, Option<usize>)> = None;
+        scrollable(
+            row(columns_ui).spacing(24).padding(24)
+        ).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::default()))
+        .into()
+    }
 
-        egui::CentralPanel::default()
-            .frame(Frame::new().fill(Color32::from_rgb(1, 4, 9)))
-            .show(ctx, |ui| {
-                ui.add_space(24.0);
-                ScrollArea::horizontal().show(ui, |ui| {
-                    ui.horizontal_top(|ui| {
-                        ui.add_space(24.0);
+    // ── Dialog Views ──────────────────────────────────────────────────────────
 
-                        for (col_id, title, desc) in COL_DEFS {
-                            let color = col_color(col_id);
-                            let cards = self.columns[col_id as usize].clone();
-                            let mut col_payload = None;
+    fn view_add_dialog(&self) -> Element<Message> {
+        let content = column![
+            text("Add card").size(18).color(Color::WHITE),
+            text("Fill in the details for your new task.").size(14).color(Color::from_rgb8(100, 100, 120)),
+            Space::new().height(Length::Fixed(12.0)),
 
-                            // Wrap the column in a scope so we can forcefully configure what
-                            // `dnd_drop_zone` uses as its background rendering colors
-                            ui.scope(|ui| {
-                                let mut dnd_visuals = ui.visuals().clone();
+            label("Title", &self.theme),
+            input(&self.add_title, "Task title", Some(Message::UpdateAddTitle), InputProps::new().size(InputSize::Size2).variant(InputVariant::Surface), &self.theme).width(Length::Fill),
+            Space::new().height(Length::Fixed(8.0)),
 
-                                // Inactive (Normal) Column State: GitHub Dark (#0D1117)
-                                dnd_visuals.widgets.inactive.bg_fill = Color32::from_rgb(13, 17, 23);
-                                dnd_visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(48, 54, 61));
+            label("Description", &self.theme),
+            input(&self.add_desc, "Optional description", Some(Message::UpdateAddDesc), InputProps::new().size(InputSize::Size2).variant(InputVariant::Surface), &self.theme).width(Length::Fill),
+            Space::new().height(Length::Fixed(18.0)),
 
-                                // Active (Hovered) Column State: Subtle Brightness Bump & Theme Colored Border
-                                dnd_visuals.widgets.active.bg_fill = Color32::from_rgb(22, 27, 34);
-                                dnd_visuals.widgets.active.bg_stroke = Stroke::new(2.0, color);
-                                *ui.visuals_mut() = dnd_visuals; // <--- The Fix
+            // FIXED: Using ButtonSize::Size3 instead of ButtonSize::Md
+            row![
+                Space::new().width(Length::Fill),
+                button("Cancel", Some(Message::CloseDialog), ButtonProps::new().variant(ButtonVariant::Outline).size(ButtonSize::Size3), &self.theme),
+                button("Add card", Some(Message::SubmitAdd), ButtonProps::new().variant(ButtonVariant::Solid).size(ButtonSize::Size3), &self.theme),
+            ].spacing(12)
+        ].spacing(4);
 
-                                let column_frame = Frame::new()
-                                    .corner_radius(CornerRadius::same(10))
-                                    .inner_margin(Margin::same(18));
+        self.modal_container(content)
+    }
 
-                                let (_, payload) = ui.dnd_drop_zone::<(Col, u64), _>(column_frame, |ui| {
-                                    ui.vertical(|ui| {
-                                        ui.set_width(340.0);
-                                        ui.set_min_height(700.0);
+    fn view_edit_dialog(&self) -> Element<Message> {
+        let content = column![
+            text("Edit card").size(18).color(Color::WHITE),
+            Space::new().height(Length::Fixed(12.0)),
 
-                                        ui.horizontal(|ui| {
-                                            let (rect, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
-                                            ui.painter().circle_stroke(rect.center(), 9.0, Stroke::new(2.0, color));
-                                            ui.add_space(4.0);
-                                            ui.label(RichText::new(title).color(Color32::WHITE).size(15.0).strong());
-                                            ui.add_space(6.0);
-                                            ui.label(RichText::new(cards.len().to_string()).color(Color32::from_rgb(100, 100, 120)).size(13.0));
+            label("Title", &self.theme),
+            input(&self.edit_title, "Task title", Some(Message::UpdateEditTitle), InputProps::new().size(InputSize::Size2).variant(InputVariant::Surface), &self.theme).width(Length::Fill),
+            Space::new().height(Length::Fixed(8.0)),
 
-                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                if button(ui, &theme, "+", ControlVariant::Ghost, ControlSize::Sm, true).clicked() {
-                                                    actions.push(Action::OpenAdd(col_id));
-                                                }
-                                            });
-                                        });
+            label("Description", &self.theme),
+            input(&self.edit_desc, "Description", Some(Message::UpdateEditDesc), InputProps::new().size(InputSize::Size2).variant(InputVariant::Surface), &self.theme).width(Length::Fill),
+            Space::new().height(Length::Fixed(18.0)),
 
-                                        ui.add_space(4.0);
-                                        ui.label(RichText::new(desc).color(Color32::from_rgb(75, 75, 95)).size(12.0));
-                                        ui.add_space(14.0);
+            // FIXED: Using ButtonSize::Size3 instead of ButtonSize::Md
+            row![
+                Space::new().width(Length::Fill),
+                button("Cancel", Some(Message::CloseDialog), ButtonProps::new().variant(ButtonVariant::Outline).size(ButtonSize::Size3), &self.theme),
+                button("Save", Some(Message::SubmitEdit), ButtonProps::new().variant(ButtonVariant::Solid).size(ButtonSize::Size3), &self.theme),
+            ].spacing(12)
+        ].spacing(4);
 
-                                        // Cards
-                                        for (idx, kcard) in cards.iter().enumerate() {
-                                            let cid = kcard.id;
-                                            let mut card_payload_inner = None;
+        self.modal_container(content)
+    }
 
-                                            // Wrap the INDIVIDUAL CARD drop zone so it doesn't draw a grey box over itself
-                                            ui.scope(|ui| {
-                                                let mut card_visuals = ui.visuals().clone();
-
-                                                // Make the drop zone totally transparent normally
-                                                card_visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
-                                                card_visuals.widgets.inactive.bg_stroke = Stroke::NONE;
-
-                                                // When hovering EXACTLY over this card slot, highlight it slightly with the column color
-                                                card_visuals.widgets.active.bg_fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 25);
-                                                card_visuals.widgets.active.bg_stroke = Stroke::new(1.0, color);
-                                                *ui.visuals_mut() = card_visuals; // <--- The Fix
-
-                                                let (_, cp) = ui.dnd_drop_zone::<(Col, u64), _>(Frame::NONE.inner_margin(0.0), |ui| {
-                                                    ui.dnd_drag_source(ui.make_persistent_id(("drag_card", cid)), (col_id, cid), |ui| {
-                                                        card(
-                                                            ui,
-                                                            &theme,
-                                                            CardProps::default().with_padding(egui::vec2(14.0, 12.0)).with_variant(CardVariant::Outline).with_shadow(false),
-                                                            |cui| {
-                                                                cui.vertical(|v| {
-                                                                    v.set_width(304.0);
-                                                                    v.label(RichText::new(&kcard.title).color(Color32::WHITE).size(13.0).strong());
-                                                                    if !kcard.description.is_empty() {
-                                                                        v.add_space(4.0);
-                                                                        v.label(RichText::new(&kcard.description).color(Color32::from_rgb(100, 100, 120)).size(12.0));
-                                                                    }
-                                                                    v.add_space(8.0);
-
-                                                                    v.horizontal(|row| {
-                                                                        if let Some(prev) = prev_col(col_id) {
-                                                                            if button(row, &theme, "<-", ControlVariant::Ghost, ControlSize::Sm, true).clicked() {
-                                                                                actions.push(Action::MoveCardCol { id: cid, from: col_id, to: prev });
-                                                                            }
-                                                                        }
-                                                                        if let Some(next) = next_col(col_id) {
-                                                                            if button(row, &theme, "->", ControlVariant::Ghost, ControlSize::Sm, true).clicked() {
-                                                                                actions.push(Action::MoveCardCol { id: cid, from: col_id, to: next });
-                                                                            }
-                                                                        }
-                                                                        row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |right| {
-                                                                            if button(right, &theme, "X", ControlVariant::Ghost, ControlSize::Sm, true).clicked() {
-                                                                                actions.push(Action::DeleteCard(cid, col_id));
-                                                                            }
-                                                                            if button(right, &theme, "Edit", ControlVariant::Ghost, ControlSize::Sm, true).clicked() {
-                                                                                actions.push(Action::OpenEdit(cid, col_id, kcard.title.clone(), kcard.description.clone()));
-                                                                            }
-                                                                        });
-                                                                    });
-                                                                });
-                                                            },
-                                                        );
-                                                    });
-                                                });
-                                                card_payload_inner = cp;
-                                            });
-
-                                            // Precise card sorting drop mapping
-                                            if let Some(payload) = card_payload_inner {
-                                                let (from_col, dragged_id) = *payload;
-                                                global_drop = Some((dragged_id, from_col, col_id, Some(idx)));
-                                            }
-
-                                            ui.add_space(10.0);
-                                        }
-
-                                        if button(ui, &theme, "+ Add item", ControlVariant::Ghost, ControlSize::Sm, true).clicked() {
-                                            actions.push(Action::OpenAdd(col_id));
-                                        }
-                                    }); // end ui.vertical
-                                }); // end col drop zone
-                                col_payload = payload;
-                            });
-
-                            if let Some(payload) = col_payload {
-                                if global_drop.is_none() {
-                                    let (from_col, dragged_id) = *payload;
-                                    global_drop = Some((dragged_id, from_col, col_id, None));
-                                }
-                            }
-
-                            ui.add_space(18.0);
-                        }
-                    });
-                });
-
-                if let Some((dragged_id, from_col, to_col, target_idx)) = global_drop {
-                    actions.push(Action::DndDrop { id: dragged_id, from_col, to_col, to_idx: target_idx });
-                }
-
-                // ── "Add card" dialog ──────────────────────────────────────
-                {
-                    let mut open = self.add_open;
-                    let mut close_dialog = false;
-                    let mut submit = false;
-                    let add_title = &mut self.add_title;
-                    let add_desc = &mut self.add_desc;
-
-                    let _ = dialog(
-                        ui, &theme,
-                        DialogProps::new(ui.make_persistent_id("kanban-add-dialog"), &mut open)
-                        .with_title("Add card").with_description("Fill in the details for your new task.")
-                        .with_align(DialogAlign::Center).with_max_width(420.0).with_height(290.0).scrollable(false)
-                        .with_scrim_opacity(160).with_close_on_background(true).with_close_on_escape(true).with_animation(true),
-                        |body| {
-                            body.add_space(12.0);
-                            body.vertical(|v| {
-                                v.spacing_mut().item_spacing.y = 6.0;
-                                let tid = v.make_persistent_id("add-card-title");
-                                Label::new("Title").for_id(tid).size(ControlSize::Sm).show(v, &theme);
-                                Input::new(tid).placeholder("Task title").size(InputSize::Size2).width(v.available_width()).show(v, &theme, add_title);
-                            });
-                            body.add_space(10.0);
-                            body.vertical(|v| {
-                                v.spacing_mut().item_spacing.y = 6.0;
-                                let did = v.make_persistent_id("add-card-desc");
-                                Label::new("Description").for_id(did).size(ControlSize::Sm).show(v, &theme);
-                                Input::new(did).placeholder("Optional description").size(InputSize::Size2).width(v.available_width()).show(v, &theme, add_desc);
-                            });
-                            body.add_space(18.0);
-                            body.horizontal(|footer| {
-                                if button(footer, &theme, "Cancel", ControlVariant::Outline, ControlSize::Md, true).clicked() {
-                                    close_dialog = true;
-                                }
-                                footer.with_layout(egui::Layout::right_to_left(egui::Align::Center), |right| {
-                                    if button(right, &theme, "Add card", ControlVariant::Primary, ControlSize::Md, true).clicked() {
-                                        submit = true;
-                                    }
-                                });
-                            });
-                        },
-                    );
-
-                    if submit && !self.add_title.trim().is_empty() {
-                        actions.push(Action::AddCard { col: self.add_col, title: self.add_title.trim().to_string(), desc: self.add_desc.trim().to_string() });
-                        self.add_title.clear();
-                        self.add_desc.clear();
-                        open = false;
-                    }
-                    if close_dialog { open = false; }
-                    self.add_open = open;
-                }
-
-                // ── "Edit card" dialog ─────────────────────────────────────
-                {
-                    let mut open = self.edit_open;
-                    let mut close_dialog = false;
-                    let mut save = false;
-                    let edit_title = &mut self.edit_title;
-                    let edit_desc = &mut self.edit_desc;
-
-                    let _ = dialog(
-                        ui, &theme,
-                        DialogProps::new(ui.make_persistent_id("kanban-edit-dialog"), &mut open)
-                        .with_title("Edit card").with_align(DialogAlign::Center).with_max_width(420.0).with_height(270.0).scrollable(false)
-                        .with_scrim_opacity(160).with_close_on_background(true).with_close_on_escape(true).with_animation(true),
-                        |body| {
-                            body.add_space(12.0);
-                            body.vertical(|v| {
-                                v.spacing_mut().item_spacing.y = 6.0;
-                                let tid = v.make_persistent_id("edit-card-title");
-                                Label::new("Title").for_id(tid).size(ControlSize::Sm).show(v, &theme);
-                                Input::new(tid).size(InputSize::Size2).width(v.available_width()).show(v, &theme, edit_title);
-                            });
-                            body.add_space(10.0);
-                            body.vertical(|v| {
-                                v.spacing_mut().item_spacing.y = 6.0;
-                                let did = v.make_persistent_id("edit-card-desc");
-                                Label::new("Description").for_id(did).size(ControlSize::Sm).show(v, &theme);
-                                Input::new(did).size(InputSize::Size2).width(v.available_width()).show(v, &theme, edit_desc);
-                            });
-                            body.add_space(18.0);
-                            body.horizontal(|footer| {
-                                if button(footer, &theme, "Cancel", ControlVariant::Outline, ControlSize::Md, true).clicked() {
-                                    close_dialog = true;
-                                }
-                                footer.with_layout(egui::Layout::right_to_left(egui::Align::Center), |right| {
-                                    if button(right, &theme, "Save", ControlVariant::Primary, ControlSize::Md, true).clicked() {
-                                        save = true;
-                                    }
-                                });
-                            });
-                        },
-                    );
-
-                    if save && !self.edit_title.trim().is_empty() {
-                        actions.push(Action::EditCard { id: self.edit_id, col: self.edit_col, title: self.edit_title.trim().to_string(), desc: self.edit_desc.trim().to_string() });
-                        open = false;
-                    }
-                    if close_dialog { open = false; }
-                    self.edit_open = open;
-                }
+    fn modal_container<'a>(&self, content: iced::widget::Column<'a, Message>) -> Element<'a, Message> {
+        let box_container = container(content)
+            .width(Length::Fixed(420.0))
+            .padding(24)
+            .style(|_theme| iced::widget::container::Style {
+                background: Some(Background::Color(Color::from_rgb8(22, 27, 34))),
+                border: Border { radius: 10.0.into(), width: 1.0, color: Color::from_rgb8(48, 54, 61) },
+                ..Default::default()
             });
 
-        for action in actions {
-            self.apply(action);
-        }
+        container(box_container)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .style(|_theme| iced::widget::container::Style {
+                background: Some(Background::Color(Color::from_rgba8(1, 4, 9, 0.85))),
+                ..Default::default()
+            })
+            .into()
     }
 }
