@@ -140,6 +140,13 @@ impl Default for KanbanApp {
 }
 
 impl KanbanApp {
+    fn col_color(col: Col) -> Color {
+    match col {
+        Col::Todo       => Color::from_rgb8(34, 197, 94),
+        Col::InProgress => Color::from_rgb8(234, 179, 8),
+        Col::Done       => Color::from_rgb8(139, 92, 246),
+    }
+}
     fn dispatch(&mut self, cmd: Command) {
         self.execute_command(&cmd);
         self.undo_stack.push(cmd);
@@ -346,7 +353,7 @@ impl KanbanApp {
             // FIXED: Using ButtonSize::Size1 instead of ButtonSize::Sm
             let mut col_content = column![
                 row![
-                    text(*title).size(15).color(Color::WHITE),
+                    text("● ").size(15).color(Self::col_color(*col_id)),text(*title).size(15).color(Color::WHITE),
                     Space::new().width(Length::Fixed(6.0)).height(Length::Fixed(0.0)),
                     text(cards.len().to_string()).size(13).color(Color::from_rgb8(100, 100, 120)),
         Space::new().width(Length::Fill).height(Length::Fixed(0.0)), // Use Fill for expansion
@@ -362,8 +369,11 @@ impl KanbanApp {
                 // FIXED: Using ButtonSize::Size1 instead of ButtonSize::Sm
                 let card_inner = column![
                     text(&kcard.title).size(14).color(Color::WHITE),
-                    text(&kcard.description).size(12).color(Color::from_rgb8(100, 100, 120)),
-                    row![
+                    if !kcard.description.is_empty() {
+    text(&kcard.description).size(12).color(Color::from_rgb8(100, 100, 120))
+} else {
+    text("").size(12)
+},                    row![
                         button("<-", prev_col(*col_id).map(|p| Message::MoveCardCol { id: cid, from: *col_id, to: p }), ButtonProps::new().variant(ButtonVariant::Ghost).size(ButtonSize::Size1), &self.theme),
                         button("->", next_col(*col_id).map(|n| Message::MoveCardCol { id: cid, from: *col_id, to: n }), ButtonProps::new().variant(ButtonVariant::Ghost).size(ButtonSize::Size1), &self.theme),
                         Space::new().width(Length::Fill),
@@ -372,7 +382,7 @@ impl KanbanApp {
                     ].align_y(Alignment::Center)
                 ].spacing(8);
 
-                let card_widget = card(card_inner, CardProps::new().variant(CardVariant::Surface).size(CardSize::Size2), &self.theme);
+                let card_widget = card(card_inner, CardProps::new().variant(CardVariant::Ghost).size(CardSize::Size2).show_shadow(false), &self.theme);
 
                 let wrapped_card = droppable(card_widget)
                     .on_drop(move |point, rect| Message::DragCardDropped { card_id: cid, point, rect });
