@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+chrono = "0.4.44"
 iced = "0.14.0"
 iced-shadcn = "0.5.0"
 iced_drop = { git = "https://github.com/jhannyj/iced_drop", features = ["helpers"] }
+lucide-icons = "1.16.0"
