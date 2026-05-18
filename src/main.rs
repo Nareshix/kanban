@@ -5,17 +5,18 @@
 
 use chrono::{Datelike, Duration, Local, Months, NaiveDate};
 use iced::widget::canvas::{self, Path, Stroke};
-use iced::widget::{column, container, mouse_area, row, scrollable, stack, text, Space};
+use iced::widget::{column, container, row, scrollable, text, Space};
+use iced::advanced::widget::Id as WidgetId;
+use iced_drop::droppable;
 use iced::{Alignment, Background, Color, Element, Font, Length, Point, Rectangle, Size, Task};
 use iced_shadcn::{
-avatar, badge, button, card, dialog, input, separator, tabs_content, tabs_contents, tabs_list, tabs_trigger,    AvatarProps, AvatarSize, BadgeProps, BadgeVariant, ButtonProps, ButtonSize, ButtonVariant,
-    CardProps, CardVariant, DialogAlign, DialogProps, InputProps, InputVariant, SeparatorProps,
-    TabsHover, TabsListProps, TabsListVariant, TabsRootProps, Theme,
+    button, card, dialog, input, separator, tabs_content, tabs_contents, tabs_list, tabs_trigger,
+    ButtonProps, ButtonSize, ButtonVariant, CardProps, CardVariant, DialogAlign, DialogProps,
+    InputProps, SeparatorProps, TabsHover, TabsListProps, TabsListVariant, TabsRootProps, Theme,
 };
 
 fn main() -> iced::Result {
     iced::application(KanbanApp::new, KanbanApp::update, KanbanApp::view)
-        .subscription(KanbanApp::subscription)
         .theme(|_: &KanbanApp| iced::Theme::Dark)
         .window(iced::window::Settings {
             size: Size::new(1200.0, 820.0),
@@ -175,12 +176,8 @@ enum Message {
     Redo,
 
     // Drag and Drop
-    DragStart(u64, Col, String),
-    DragMoved(Point),
-    DragCancelled,
-    DragEnterCol(Col),
-    DragLeaveCol,
-    DragDropOnCol(Col),
+    CardDropped(u64, Col, Point, Rectangle),
+    HandleDropZones(u64, Col, Vec<(WidgetId, Rectangle)>),
 
     // Calendar Navigation
     CalendarPrevMonth,
@@ -199,10 +196,8 @@ struct KanbanApp {
     undo_stack: Vec<Command>,
     redo_stack: Vec<Command>,
 
-    // Drag state
-    dragging: Option<(u64, Col, String)>,
-    drag_position: Option<Point>,
-    drag_hover_col: Option<Col>,
+    // Drop zone IDs
+    col_ids: [WidgetId; 3],
 
     // Dialog state
     add_open: bool,
@@ -263,9 +258,11 @@ impl KanbanApp {
             next_id: 5,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            dragging: None,
-            drag_position: None,
-            drag_hover_col: None,
+            col_ids: [
+                WidgetId::new("col_todo"),
+                WidgetId::new("col_inprogress"),
+                WidgetId::new("col_done"),
+            ],
             add_open: false,
             add_col: Col::Todo,
             add_title: String::new(),
@@ -395,9 +392,6 @@ impl KanbanApp {
                 self.add_end_str = (start_date + Duration::days(1)).format("%Y-%m-%d").to_string();
             }
             Message::OpenEdit(id, col, title, desc, start, end) => {
-                self.dragging = None;
-                self.drag_position = None;
-                self.drag_hover_col = None;
                 self.edit_open = true;
                 self.edit_id = id;
                 self.edit_col = col;
@@ -503,45 +497,38 @@ impl KanbanApp {
                 }
             }
 
-            Message::DragStart(id, col, title) => {
-                self.dragging = Some((id, col, title));
+Message::CardDropped(card_id, from_col, point, _rect) => {
+                return iced_drop::zones_on_point(
+                    move |zones| Message::HandleDropZones(card_id, from_col, zones),
+                    point,
+                    None,
+                    None,
+                );
             }
-            Message::DragMoved(pos) => {
-                self.drag_position = Some(pos);
-            }
-            Message::DragCancelled => {
-                self.dragging = None;
-                self.drag_position = None;
-                self.drag_hover_col = None;
-            }
-            Message::DragEnterCol(col) => {
-                if self.dragging.is_some() {
-                    self.drag_hover_col = Some(col);
-                }
-            }
-            Message::DragLeaveCol => {
-                self.drag_hover_col = None;
-            }
-            Message::DragDropOnCol(to_col) => {
-                self.drag_position = None;
-                if let Some((id, from_col, _title)) = self.dragging.take() {
-                    if from_col != to_col {
-                        if let Some(from_idx) = self.columns[from_col as usize]
-                            .iter()
-                            .position(|c| c.id == id)
-                        {
-                            let to_idx = self.columns[to_col as usize].len();
-                            self.dispatch(Command::Move {
-                                id,
-                                from_col,
-                                to_col,
-                                from_idx,
-                                to_idx,
-                            });
+            Message::HandleDropZones(card_id, from_col, zones) => {
+                if let Some((zone_id, _)) = zones.first() {
+                    let to_col = [Col::Todo, Col::InProgress, Col::Done]
+                        .iter()
+                        .find(|&&col| &self.col_ids[col as usize] == zone_id)
+                        .copied();
+                    if let Some(to_col) = to_col {
+                        if from_col != to_col {
+                            if let Some(from_idx) = self.columns[from_col as usize]
+                                .iter()
+                                .position(|c| c.id == card_id)
+                            {
+                                let to_idx = self.columns[to_col as usize].len();
+                                self.dispatch(Command::Move {
+                                    id: card_id,
+                                    from_col,
+                                    to_col,
+                                    from_idx,
+                                    to_idx,
+                                });
+                            }
                         }
                     }
                 }
-                self.drag_hover_col = None;
             }
 
             Message::CalendarPrevMonth => {
@@ -557,21 +544,6 @@ impl KanbanApp {
             }
         }
         Task::none()
-    }
-fn subscription(&self) -> iced::Subscription<Message> {
-        if self.dragging.is_some() {
-            iced::event::listen_with(|event, _status, _id| match event {
-                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
-                    Some(Message::DragMoved(position))
-                }
-                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
-                    iced::mouse::Button::Left,
-                )) => Some(Message::DragCancelled),
-                _ => None,
-            })
-        } else {
-            iced::Subscription::none()
-        }
     }
     fn view(&self) -> Element<Message> {
         let theme = &self.theme;
@@ -645,7 +617,7 @@ fn subscription(&self) -> iced::Subscription<Message> {
         .width(Length::Fill)
         .height(Length::Fill);
 
-        let base_ui: Element<Message> = container(main_view)
+        let mut app_ui: Element<Message> = container(main_view)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(move |_t| iced::widget::container::Style {
@@ -654,18 +626,6 @@ fn subscription(&self) -> iced::Subscription<Message> {
                 ..Default::default()
             })
             .into();
-
-        let ghost: Element<Message> = canvas::Canvas::new(DragGhostProgram {
-            title: self.dragging.as_ref().map(|(_, _, t)| t.clone()).unwrap_or_default(),
-            col: self.dragging.as_ref().map(|(_, c, _)| *c).unwrap_or(Col::Todo),
-            position: self.drag_position.unwrap_or(Point::ORIGIN),
-            active: self.dragging.is_some() && self.drag_position.is_some(),
-        })
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into();
-
-        let mut app_ui: Element<Message> = stack(vec![base_ui, ghost]).into();
 
         app_ui = dialog(
             app_ui,
@@ -775,7 +735,7 @@ fn subscription(&self) -> iced::Subscription<Message> {
                 card_col = card_col.push(actions_row);
 
                 cards_ui.push(
-                    mouse_area(
+                    droppable(
                         card(
                             card_col,
                             CardProps::new().variant(CardVariant::Surface),
@@ -784,7 +744,8 @@ fn subscription(&self) -> iced::Subscription<Message> {
                         .padding(14)
                         .width(Length::Fill),
                     )
-                    .on_press(Message::DragStart(cid, col_id, ctitle.clone()))
+                    .on_drop(move |point, rect| Message::CardDropped(cid, col_id, point, rect))
+                    .drag_hide(true)
                     .into(),
                 );
             }
@@ -839,32 +800,22 @@ fn subscription(&self) -> iced::Subscription<Message> {
             .spacing(14)
             .width(Length::Fixed(340.0));
 
-            let is_drop_target = self.dragging.is_some()
-                && self.drag_hover_col == Some(col_id);
-
+        let zone_id = self.col_ids[col_id as usize].clone();
             columns_ui.push(
-                mouse_area(
-                    container(col_content)
-                        .padding(18)
-                        .height(Length::Fill)
-                        .style(move |_| iced::widget::container::Style {
-                            background: Some(Background::Color(Color::from_rgb8(13, 17, 23))),
-                            border: iced::border::Border {
-                                color: if is_drop_target {
-                                    color // highlight with column colour
-                                } else {
-                                    Color::from_rgb8(48, 54, 61)
-                                },
-                                width: if is_drop_target { 2.0 } else { 1.0 },
-                                radius: 10.0.into(),
-                            },
-                            ..Default::default()
-                        }),
-                )
-                .on_enter(Message::DragEnterCol(col_id))
-                .on_exit(Message::DragLeaveCol)
-                .on_release(Message::DragDropOnCol(col_id))
-                .into(),
+                container(col_content)
+                    .id(zone_id)
+                    .padding(18)
+                    .height(Length::Fill)
+                    .style(move |_| iced::widget::container::Style {
+                        background: Some(Background::Color(Color::from_rgb8(13, 17, 23))),
+                        border: iced::border::Border {
+                            color: Color::from_rgb8(48, 54, 61),
+                            width: 1.0,
+                            radius: 10.0.into(),
+                        },
+                        ..Default::default()
+                    })
+                    .into(),
             );
         }
 
@@ -1608,81 +1559,3 @@ impl canvas::Program<Message> for CalendarProgram {
     }
 }
 
-
-struct DragGhostProgram {
-    title: String,
-    col: Col,
-    position: Point,
-    active: bool,
-}
-
-impl canvas::Program<Message> for DragGhostProgram {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &Self::State,
-        renderer: &iced::Renderer,
-        _theme: &iced::Theme,
-        bounds: Rectangle,
-        _cursor: iced::mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        if !self.active {
-            return vec![];
-        }
-
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-
-        let w = 220.0_f32;
-        let h = 52.0_f32;
-        // Convert window coordinates → local canvas coordinates
-        let local_x = self.position.x - bounds.x;
-        let local_y = self.position.y - bounds.y;
-        let x = (local_x - w / 2.0).max(0.0).min(bounds.width - w);
-        let y = (local_y - h / 2.0).max(0.0).min(bounds.height - h);
-
-        // Drop shadow
-        frame.fill(
-            &Path::rectangle(Point::new(x + 4.0, y + 4.0), Size::new(w, h)),
-            Color { r: 0.0, g: 0.0, b: 0.0, a: 0.4 },
-        );
-
-        // Card body
-        frame.fill(
-            &Path::rectangle(Point::new(x, y), Size::new(w, h)),
-            Color::from_rgb8(22, 28, 36),
-        );
-
-        // Coloured left accent strip
-        let accent = col_color(self.col);
-        frame.fill(
-            &Path::rectangle(Point::new(x, y), Size::new(4.0, h)),
-            accent,
-        );
-
-        // Border
-        frame.stroke(
-            &Path::rectangle(Point::new(x, y), Size::new(w, h)),
-            Stroke::default()
-                .with_width(1.5)
-                .with_color(apply_opacity(accent, 0.6)),
-        );
-
-        // Title text
-        frame.fill_text(canvas::Text {
-            content: if self.title.len() > 26 {
-                format!("{}…", &self.title[..26])
-            } else {
-                self.title.clone()
-            },
-            position: Point::new(x + 14.0, y + h / 2.0),
-            color: Color::WHITE,
-            size: iced::Pixels(14.0),
-            align_x: iced::alignment::Horizontal::Left.into(),
-            align_y: iced::alignment::Vertical::Center,
-            ..Default::default()
-        });
-
-        vec![frame.into_geometry()]
-    }
-}
