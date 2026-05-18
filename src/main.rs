@@ -76,7 +76,20 @@ fn next_col(col: Col) -> Option<Col> {
     }
 }
 
-// ── Custom Shadcn-like UI Helpers ─────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn add_months(date: NaiveDate, months: i32) -> NaiveDate {
+    let mut year = date.year() + (months / 12);
+    let mut month = date.month() as i32 + (months % 12);
+    if month < 1 {
+        year -= 1;
+        month += 12;
+    } else if month > 12 {
+        year += 1;
+        month -= 12;
+    }
+    NaiveDate::from_ymd_opt(year, month as u32, 1).unwrap()
+}
 
 fn custom_badge(ui: &mut egui::Ui, text: &str, color: Color32) {
     egui::Frame::NONE
@@ -136,7 +149,6 @@ enum Command {
     },
 }
 
-// Operations collected during rendering
 enum Action {
     OpenAdd(Col),
     OpenAddWithDate(NaiveDate),
@@ -189,13 +201,11 @@ struct KanbanApp {
     next_id: u64,
 
     active_tab: String,
-    calendar_selected_date: Option<NaiveDate>,
+    calendar_view_month: NaiveDate,
 
-    // Command History
     undo_stack: Vec<Command>,
     redo_stack: Vec<Command>,
 
-    // "Add card" dialog
     add_open: bool,
     add_col: Col,
     add_title: String,
@@ -203,7 +213,6 @@ struct KanbanApp {
     add_start_str: String,
     add_end_str: String,
 
-    // "Edit card" dialog
     edit_open: bool,
     edit_id: u64,
     edit_col: Col,
@@ -219,7 +228,7 @@ impl KanbanApp {
         Self {
             theme: Theme::default(),
             active_tab: "board".to_string(),
-            calendar_selected_date: Some(today),
+            calendar_view_month: NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap(),
             columns: [
                 vec![
                     KanbanCard {
@@ -241,7 +250,7 @@ impl KanbanApp {
                     id: 3,
                     title: "Implement auth flow".into(),
                     description: "OAuth2 with refresh tokens".into(),
-                    start_date: Some(today + Duration::days(1)),
+                    start_date: Some(today - Duration::days(2)),
                     end_date: Some(today + Duration::days(5)),
                 }],
                 vec![KanbanCard {
@@ -508,7 +517,6 @@ impl KanbanApp {
 impl eframe::App for KanbanApp {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         let mut visuals = egui::Visuals::dark();
-        // Setting the overall App background slightly dark GitHub style `#010409`
         visuals.panel_fill = Color32::from_rgb(1, 4, 9);
         ctx.set_visuals(visuals);
 
@@ -534,7 +542,6 @@ impl eframe::App for KanbanApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(Color32::from_rgb(1, 4, 9)).inner_margin(24.0))
             .show(ctx, |ui| {
-                // ── Header / Navigation Tabs ──────────────────────────────────────
                 let tab_items = [
                     TabItem::new("board", "Board"),
                     TabItem::new("timeline", "Timeline"),
@@ -569,10 +576,7 @@ impl eframe::App for KanbanApp {
                     actions.push(Action::DndDrop { id: dragged_id, from_col, to_col, to_idx: target_idx });
                 }
 
-                // ── "Add card" dialog ──────────────────────────────────────
                 self.render_add_dialog(ui, &theme, &mut actions);
-
-                // ── "Edit card" dialog ─────────────────────────────────────
                 self.render_edit_dialog(ui, &theme, &mut actions);
             });
 
@@ -608,8 +612,7 @@ impl KanbanApp {
                     ui.scope(|ui| {
                         let mut dnd_visuals = ui.visuals().clone();
                         dnd_visuals.widgets.inactive.bg_fill = Color32::from_rgb(13, 17, 23);
-                        dnd_visuals.widgets.inactive.bg_stroke =
-                            Stroke::new(1.0, Color32::from_rgb(48, 54, 61));
+                        dnd_visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(48, 54, 61));
                         dnd_visuals.widgets.active.bg_fill = Color32::from_rgb(22, 27, 34);
                         dnd_visuals.widgets.active.bg_stroke = Stroke::new(2.0, color);
                         *ui.visuals_mut() = dnd_visuals;
@@ -622,55 +625,25 @@ impl KanbanApp {
                             ui.dnd_drop_zone::<(Col, u64), _>(column_frame, |ui| {
                                 ui.vertical(|ui| {
                                     ui.set_width(340.0);
-                                    ui.set_min_height(600.0); // Make space for dnd drops
+                                    ui.set_min_height(600.0);
 
                                     ui.horizontal(|ui| {
-                                        let (rect, _) =
-                                            ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
-                                        ui.painter().circle_stroke(
-                                            rect.center(),
-                                            9.0,
-                                            Stroke::new(2.0, color),
-                                        );
+                                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
+                                        ui.painter().circle_stroke(rect.center(), 9.0, Stroke::new(2.0, color));
                                         ui.add_space(4.0);
-                                        ui.label(
-                                            RichText::new(title)
-                                                .color(Color32::WHITE)
-                                                .size(15.0)
-                                                .strong(),
-                                        );
+                                        ui.label(RichText::new(title).color(Color32::WHITE).size(15.0).strong());
                                         ui.add_space(6.0);
-                                        ui.label(
-                                            RichText::new(cards.len().to_string())
-                                                .color(Color32::from_rgb(100, 100, 120))
-                                                .size(13.0),
-                                        );
+                                        ui.label(RichText::new(cards.len().to_string()).color(Color32::from_rgb(100, 100, 120)).size(13.0));
 
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if button(
-                                                    ui,
-                                                    theme,
-                                                    "+",
-                                                    ControlVariant::Ghost,
-                                                    ControlSize::Sm,
-                                                    true,
-                                                )
-                                                .clicked()
-                                                {
-                                                    actions.push(Action::OpenAdd(col_id));
-                                                }
-                                            },
-                                        );
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            if button(ui, theme, "+", ControlVariant::Ghost, ControlSize::Sm, true).clicked() {
+                                                actions.push(Action::OpenAdd(col_id));
+                                            }
+                                        });
                                     });
 
                                     ui.add_space(4.0);
-                                    ui.label(
-                                        RichText::new(desc)
-                                            .color(Color32::from_rgb(75, 75, 95))
-                                            .size(12.0),
-                                    );
+                                    ui.label(RichText::new(desc).color(Color32::from_rgb(75, 75, 95)).size(12.0));
                                     ui.add_space(14.0);
 
                                     for (idx, kcard) in cards.iter().enumerate() {
@@ -679,79 +652,49 @@ impl KanbanApp {
 
                                         ui.scope(|ui| {
                                             let mut card_visuals = ui.visuals().clone();
-                                            card_visuals.widgets.inactive.bg_fill =
-                                                Color32::TRANSPARENT;
+                                            card_visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
                                             card_visuals.widgets.inactive.bg_stroke = Stroke::NONE;
-                                            card_visuals.widgets.active.bg_fill =
-                                                Color32::from_rgba_unmultiplied(
-                                                    color.r(),
-                                                    color.g(),
-                                                    color.b(),
-                                                    25,
-                                                );
-                                            card_visuals.widgets.active.bg_stroke =
-                                                Stroke::new(1.0, color);
+                                            card_visuals.widgets.active.bg_fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 25);
+                                            card_visuals.widgets.active.bg_stroke = Stroke::new(1.0, color);
                                             *ui.visuals_mut() = card_visuals;
 
                                             let (_, cp) = ui.dnd_drop_zone::<(Col, u64), _>(
                                                 egui::Frame::NONE.inner_margin(0.0),
                                                 |ui| {
-                                                    ui.dnd_drag_source(
-                                                        ui.make_persistent_id(("drag_card", cid)),
-                                                        (col_id, cid),
-                                                        |ui| {
-                                                            card(
-                                                                ui,
-                                                                theme,
-                                                                CardProps::default()
-                                                                    .with_padding(egui::vec2(14.0, 12.0))
-                                                                    .with_variant(CardVariant::Outline),
-                                                                |cui| {
-                                                                    cui.vertical(|v| {
-                                                                        v.set_width(304.0);
-                                                                        v.label(
-                                                                            RichText::new(&kcard.title)
-                                                                                .color(Color32::WHITE)
-                                                                                .size(13.0)
-                                                                                .strong(),
-                                                                        );
-                                                                        if !kcard.description.is_empty() {
-                                                                            v.add_space(4.0);
-                                                                            v.label(
-                                                                                RichText::new(
-                                                                                    &kcard.description,
-                                                                                )
-                                                                                .color(Color32::from_rgb(100, 100, 120))
-                                                                                .size(12.0),
-                                                                            );
-                                                                        }
-                                                                        v.add_space(8.0);
+                                                    ui.dnd_drag_source(ui.make_persistent_id(("drag_card", cid)), (col_id, cid), |ui| {
+                                                        card(ui, theme, CardProps::default().with_padding(egui::vec2(14.0, 12.0)).with_variant(CardVariant::Outline), |cui| {
+                                                            cui.vertical(|v| {
+                                                                v.set_width(304.0);
+                                                                v.label(RichText::new(&kcard.title).color(Color32::WHITE).size(13.0).strong());
+                                                                if !kcard.description.is_empty() {
+                                                                    v.add_space(4.0);
+                                                                    v.label(RichText::new(&kcard.description).color(Color32::from_rgb(100, 100, 120)).size(12.0));
+                                                                }
+                                                                v.add_space(8.0);
 
-                                                                        v.horizontal(|row| {
-                                                                            if let Some(prev) = prev_col(col_id) {
-                                                                                if button(row, theme, "<-", ControlVariant::Ghost, ControlSize::Sm, true).clicked() {
-                                                                                    actions.push(Action::MoveCardCol { id: cid, from: col_id, to: prev });
-                                                                                }
-                                                                            }
-                                                                            if let Some(next) = next_col(col_id) {
-                                                                                if button(row, theme, "->", ControlVariant::Ghost, ControlSize::Sm, true).clicked() {
-                                                                                    actions.push(Action::MoveCardCol { id: cid, from: col_id, to: next });
-                                                                                }
-                                                                            }
-                                                                            row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |right| {
-                                                                                if button(right, theme, "X", ControlVariant::Ghost, ControlSize::Sm, true).clicked() {
-                                                                                    actions.push(Action::DeleteCard(cid, col_id));
-                                                                                }
-                                                                                if button(right, theme, "Edit", ControlVariant::Ghost, ControlSize::Sm, true).clicked() {
-                                                                                    actions.push(Action::OpenEdit(cid, col_id, kcard.title.clone(), kcard.description.clone(), kcard.start_date, kcard.end_date));
-                                                                                }
-                                                                            });
-                                                                        });
+                                                                v.horizontal(|row| {
+                                                                    if let Some(prev) = prev_col(col_id) {
+                                                                        if button(row, theme, "<-", ControlVariant::Ghost, ControlSize::Sm, true).clicked() {
+                                                                            actions.push(Action::MoveCardCol { id: cid, from: col_id, to: prev });
+                                                                        }
+                                                                    }
+                                                                    if let Some(next) = next_col(col_id) {
+                                                                        if button(row, theme, "->", ControlVariant::Ghost, ControlSize::Sm, true).clicked() {
+                                                                            actions.push(Action::MoveCardCol { id: cid, from: col_id, to: next });
+                                                                        }
+                                                                    }
+                                                                    row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |right| {
+                                                                        if button(right, theme, "X", ControlVariant::Ghost, ControlSize::Sm, true).clicked() {
+                                                                            actions.push(Action::DeleteCard(cid, col_id));
+                                                                        }
+                                                                        if button(right, theme, "Edit", ControlVariant::Ghost, ControlSize::Sm, true).clicked() {
+                                                                            actions.push(Action::OpenEdit(cid, col_id, kcard.title.clone(), kcard.description.clone(), kcard.start_date, kcard.end_date));
+                                                                        }
                                                                     });
-                                                                },
-                                                            );
-                                                        },
-                                                    );
+                                                                });
+                                                            });
+                                                        });
+                                                    });
                                                 },
                                             );
                                             card_payload_inner = cp;
@@ -759,23 +702,13 @@ impl KanbanApp {
 
                                         if let Some(payload) = card_payload_inner {
                                             let (from_col, dragged_id) = *payload;
-                                            *global_drop =
-                                                Some((dragged_id, from_col, col_id, Some(idx)));
+                                            *global_drop = Some((dragged_id, from_col, col_id, Some(idx)));
                                         }
 
                                         ui.add_space(10.0);
                                     }
 
-                                    if button(
-                                        ui,
-                                        theme,
-                                        "+ Add item",
-                                        ControlVariant::Ghost,
-                                        ControlSize::Sm,
-                                        true,
-                                    )
-                                    .clicked()
-                                    {
+                                    if button(ui, theme, "+ Add item", ControlVariant::Ghost, ControlSize::Sm, true).clicked() {
                                         actions.push(Action::OpenAdd(col_id));
                                     }
                                 });
@@ -885,11 +818,6 @@ impl KanbanApp {
                             (base_color.g() as u16 + 40).min(255) as u8,
                             (base_color.b() as u16 + 40).min(255) as u8,
                         );
-                        bar_resp.on_hover_ui_at_pointer(|ui| {
-                            let sd = card.start_date.map_or("".into(), |d| d.format("%Y-%m-%d").to_string());
-                            let ed = card.end_date.map_or("".into(), |d| d.format("%Y-%m-%d").to_string());
-                            ui.label(format!("{}\n{} to {}", card.title, sd, ed));
-                        });
                     }
 
                     painter.rect_filled(bar_rect, CornerRadius::same(6), base_color);
@@ -904,86 +832,224 @@ impl KanbanApp {
     }
 
     fn render_calendar(&mut self, ui: &mut egui::Ui, theme: &Theme, actions: &mut Vec<Action>) {
-        ui.horizontal(|ui| {
-            card(
-                ui,
-                theme,
-                CardProps::default().with_padding(egui::vec2(16.0, 16.0)),
-                |ui| {
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new("Calendar").strong().size(16.0));
-                        ui.add_space(8.0);
+        ui.vertical(|ui| {
+            // --- HEADER CONTROLS ---
+            ui.horizontal(|ui| {
+                if button(ui, theme, "Today", ControlVariant::Outline, ControlSize::Md, true).clicked() {
+                    let today = Local::now().date_naive();
+                    self.calendar_view_month = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap();
+                }
 
-                        // Fake a calendar with egui grid
-                        let today = Local::now().date_naive();
-                        let start_of_month = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap();
-                        let start_weekday = start_of_month.weekday().num_days_from_monday();
+                ui.add_space(8.0);
 
-                        egui::Grid::new("calendar_grid").spacing([8.0, 8.0]).show(ui, |ui| {
-                            for day in ["M", "T", "W", "T", "F", "S", "S"] {
-                                ui.label(RichText::new(day).color(theme.palette.muted_foreground).strong());
-                            }
-                            ui.end_row();
+                if button(ui, theme, "<", ControlVariant::Outline, ControlSize::Md, true).clicked() {
+                    self.calendar_view_month = add_months(self.calendar_view_month, -1);
+                }
+                if button(ui, theme, ">", ControlVariant::Outline, ControlSize::Md, true).clicked() {
+                    self.calendar_view_month = add_months(self.calendar_view_month, 1);
+                }
 
-                            let mut current_date = start_of_month - Duration::days(start_weekday as i64);
+                ui.add_space(16.0);
+                ui.label(RichText::new(self.calendar_view_month.format("%B %Y").to_string()).strong().size(22.0));
+            });
 
-                            for _week in 0..5 {
-                                for _day in 0..7 {
-                                    let mut btn = egui::Button::new(current_date.format("%d").to_string());
+            ui.add_space(16.0);
 
-                                    if current_date.month() != today.month() {
-                                        btn = btn.fill(Color32::TRANSPARENT);
-                                    } else if Some(current_date) == self.calendar_selected_date {
-                                        btn = btn.fill(theme.palette.primary);
-                                    }
+            // --- GOOGLE-STYLE GRID ---
+            let (rect, _resp) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+            let painter = ui.painter_at(rect); // Use painter localized to the layout rect
 
-                                    if ui.add_sized([32.0, 32.0], btn).clicked() {
-                                        self.calendar_selected_date = Some(current_date);
-                                    }
-                                    current_date += Duration::days(1);
-                                }
-                                ui.end_row();
-                            }
-                        });
+            let header_h = 32.0;
+            let col_w = rect.width() / 7.0;
+            let row_h = (rect.height() - header_h) / 6.0;
 
-                        if let Some(d) = self.calendar_selected_date {
-                            ui.add_space(16.0);
-                            if button(ui, theme, "+ Add Task Here", ControlVariant::Outline, ControlSize::Sm, true).clicked() {
-                                actions.push(Action::OpenAddWithDate(d));
-                            }
-                        }
-                    });
-                },
-            );
+            // 1. Draw Weekday Headers
+            let weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+            for (i, day) in weekdays.iter().enumerate() {
+                let x = rect.left() + col_w * (i as f32);
+                let y = rect.top();
 
-            ui.add_space(24.0);
+                painter.text(
+                    egui::pos2(x + col_w / 2.0, y + header_h / 2.0),
+                    egui::Align2::CENTER_CENTER,
+                    *day,
+                    egui::FontId::proportional(14.0),
+                    theme.palette.muted_foreground,
+                );
+            }
 
-            // Display tasks that land on the selected date
-            ui.vertical(|ui| {
-                ui.label(RichText::new("Tasks for this day").size(18.0).strong());
-                ui.add_space(12.0);
+            let grid_top = rect.top() + header_h;
+            let days_from_sun = self.calendar_view_month.weekday().num_days_from_sunday();
+            let start_date = self.calendar_view_month - Duration::days(days_from_sun as i64);
+            let today = Local::now().date_naive();
 
-                let mut any_tasks = false;
-                if let Some(selected_date) = self.calendar_selected_date {
-                    let col_defs = [Col::Todo, Col::InProgress, Col::Done];
-                    for col_id in col_defs {
-                        for card in &self.columns[col_id as usize] {
-                            let match_date = card.start_date.unwrap_or(Local::now().date_naive());
-                            if match_date == selected_date {
-                                any_tasks = true;
-                                ui.horizontal(|ui| {
-                                    custom_badge(ui, col_name(col_id), col_color(col_id));
-                                    ui.label(&card.title);
-                                });
-                                ui.add_space(6.0);
-                            }
-                        }
+            // Collect all tasks for track allocation
+            let mut all_tasks = Vec::new();
+            for col_id in [Col::Todo, Col::InProgress, Col::Done] {
+                for card in &self.columns[col_id as usize] {
+                    all_tasks.push((col_id, card.clone()));
+                }
+            }
+
+            // 2. Draw 6x7 Grid of Days
+            for row in 0..6 {
+                let week_start = start_date + Duration::days((row * 7) as i64);
+                let week_end = week_start + Duration::days(6);
+
+                // Draw cells and handle clicks
+                let mut cell_clicks = None;
+
+                for col in 0..7 {
+                    let cell_date = week_start + Duration::days(col as i64);
+                    let x = rect.left() + col_w * (col as f32);
+                    let y = grid_top + row_h * (row as f32);
+                    let cell_rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(col_w, row_h));
+
+                    // Cell Borders
+                    painter.rect_stroke(
+                        cell_rect,
+                        0.0,
+                        Stroke::new(1.0, theme.palette.border),
+                        egui::StrokeKind::Inside,
+                    );
+
+                    // Background Interaction
+                    let cell_interact = ui.interact(cell_rect, ui.id().with(("bg", cell_date)), Sense::click());
+                    if cell_interact.clicked() {
+                        cell_clicks = Some(cell_date);
+                    }
+
+                    // DATE NUMBER
+                    let label_text = if cell_date.day() == 1 {
+                        cell_date.format("%b %-d").to_string()
+                    } else {
+                        cell_date.format("%-d").to_string()
+                    };
+
+                    let is_current_month = cell_date.month() == self.calendar_view_month.month();
+
+                    if cell_date == today {
+                        // Highlight today
+                        painter.circle_filled(egui::pos2(x + col_w / 2.0, y + 16.0), 12.0, theme.palette.primary);
+                        painter.text(
+                            egui::pos2(x + col_w / 2.0, y + 16.0),
+                            egui::Align2::CENTER_CENTER,
+                            label_text,
+                            egui::FontId::proportional(13.0),
+                            theme.palette.primary_foreground
+                        );
+                    } else {
+                        let color = if is_current_month { theme.palette.foreground } else { theme.palette.muted_foreground };
+                        painter.text(
+                            egui::pos2(x + col_w / 2.0, y + 16.0),
+                            egui::Align2::CENTER_CENTER,
+                            label_text,
+                            egui::FontId::proportional(13.0),
+                            color
+                        );
                     }
                 }
-                if !any_tasks {
-                    ui.label(RichText::new("No tasks scheduled.").color(theme.palette.muted_foreground));
+
+                // Gather and clamp events for this week
+                let mut week_events = Vec::new();
+                for (col, card) in &all_tasks {
+                    let s = card.start_date.unwrap_or(today);
+                    let e = card.end_date.unwrap_or(s);
+
+                    // Does it overlap this week?
+                    if s <= week_end && e >= week_start {
+                        let clamp_s = s.max(week_start);
+                        let clamp_e = e.min(week_end);
+                        week_events.push((*col, card, clamp_s, clamp_e, s, e));
+                    }
                 }
-            });
+
+                // Sort: Longest span first, then by start date
+                week_events.sort_by_key(|(_, _, cs, ce, _, _)| {
+                    (-((*ce - *cs).num_days()), *cs)
+                });
+
+                // Track allocator: assign vertical slots to avoid overlap
+                let mut tracks: Vec<NaiveDate> = Vec::new(); // stores the end date in each track
+
+                let mut pill_clicked = false;
+
+                for (col, card, cs, ce, orig_s, orig_e) in week_events {
+                    let mut assigned_track = 0;
+                    loop {
+                        if assigned_track >= tracks.len() {
+                            tracks.push(ce);
+                            break;
+                        } else {
+                            if cs > tracks[assigned_track] {
+                                tracks[assigned_track] = ce;
+                                break;
+                            }
+                        }
+                        assigned_track += 1;
+                    }
+
+                    // Calculate Dimensions
+                    let start_col = (cs - week_start).num_days() as f32;
+                    let span = (ce - cs).num_days() as f32 + 1.0;
+
+                    let pill_x = rect.left() + col_w * start_col + 2.0; // 2px margin
+                    let pill_y = grid_top + row_h * (row as f32) + 28.0 + (assigned_track as f32 * 20.0); // 28px for date header
+                    let pill_w = col_w * span - 4.0;
+                    let pill_h = 18.0;
+
+                    let pill_rect = egui::Rect::from_min_size(egui::pos2(pill_x, pill_y), egui::vec2(pill_w, pill_h));
+
+                    // Don't draw if it exceeds row height
+                    if pill_y + pill_h < grid_top + row_h * (row as f32) + row_h {
+                        let bg_color = col_color(col);
+                        let mut paint_color = bg_color;
+                        let bar_resp = ui.interact(pill_rect, ui.id().with(card.id).with(row), Sense::click());
+
+                        if bar_resp.hovered() {
+                            paint_color = Color32::from_rgb(
+                                (bg_color.r() as u16 + 40).min(255) as u8,
+                                (bg_color.g() as u16 + 40).min(255) as u8,
+                                (bg_color.b() as u16 + 40).min(255) as u8,
+                            );
+                        }
+
+                        if bar_resp.clicked() {
+                            pill_clicked = true;
+                            actions.push(Action::OpenEdit(
+                                card.id, col, card.title.clone(), card.description.clone(), card.start_date, card.end_date
+                            ));
+                        }
+
+                        // Flatten corners if it spills over the week bounds
+                        let mut rounding = CornerRadius::same(4);
+                        if orig_s < cs { rounding.nw = 0; rounding.sw = 0; }
+                        if orig_e > ce { rounding.ne = 0; rounding.se = 0; }
+
+                        painter.rect_filled(pill_rect, rounding, paint_color.gamma_multiply(0.3));
+
+                        // Clip text so it doesn't overflow pill
+                        let mut text_clip = pill_rect;
+                        text_clip.max.x -= 4.0;
+                        let mut p = painter.with_clip_rect(text_clip);
+
+                        p.text(
+                            egui::pos2(pill_x + 4.0, pill_y + pill_h / 2.0),
+                            egui::Align2::LEFT_CENTER,
+                            &card.title,
+                            egui::FontId::proportional(12.0),
+                            paint_color,
+                        );
+                    }
+                }
+
+                // If background was clicked AND no pill was clicked, open Add Dialog
+                if let Some(date) = cell_clicks {
+                    if !pill_clicked {
+                        actions.push(Action::OpenAddWithDate(date));
+                    }
+                }
+            }
         });
     }
 
