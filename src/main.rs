@@ -18,8 +18,7 @@ use iced_shadcn::{
 fn main() -> iced::Result {
     iced::application(KanbanApp::new, KanbanApp::update, KanbanApp::view)
         .theme(|_: &KanbanApp| iced::Theme::Dark)
-            .subscription(KanbanApp::subscription)
-
+        .subscription(KanbanApp::subscription)
         .window(iced::window::Settings {
             size: Size::new(1200.0, 820.0),
             ..Default::default()
@@ -201,6 +200,9 @@ struct KanbanApp {
     // Drop zone IDs
     col_ids: [WidgetId; 3],
 
+    // Fix: state to optimistically hide the dropped card while calculating
+    moving_card: Option<u64>,
+
     // Dialog state
     add_open: bool,
     add_col: Col,
@@ -265,6 +267,7 @@ impl KanbanApp {
                 WidgetId::new("col_inprogress"),
                 WidgetId::new("col_done"),
             ],
+            moving_card: None, // Fix: initialized to None
             add_open: false,
             add_col: Col::Todo,
             add_title: String::new(),
@@ -374,32 +377,33 @@ impl KanbanApp {
         }
     }
 
-fn subscription(&self) -> iced::Subscription<Message> {
-    iced::event::listen_with(|event, _status, _window| {
-        if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
-            key,
-            modifiers,
-            ..
-        }) = event
-        {
-            let cmd = modifiers.control() || modifiers.logo(); // Ctrl on Win/Linux, ⌘ on Mac
-            if cmd {
-                return match key.as_ref() {
-                    iced::keyboard::Key::Character("z") => {
-                        if modifiers.shift() {
-                            Some(Message::Redo)   // ⌘⇧Z
-                        } else {
-                            Some(Message::Undo)   // ⌘Z
+    fn subscription(&self) -> iced::Subscription<Message> {
+        iced::event::listen_with(|event, _status, _window| {
+            if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key,
+                modifiers,
+                ..
+            }) = event
+            {
+                let cmd = modifiers.control() || modifiers.logo(); // Ctrl on Win/Linux, ⌘ on Mac
+                if cmd {
+                    return match key.as_ref() {
+                        iced::keyboard::Key::Character("z") => {
+                            if modifiers.shift() {
+                                Some(Message::Redo)   // ⌘⇧Z
+                            } else {
+                                Some(Message::Undo)   // ⌘Z
+                            }
                         }
-                    }
-                    iced::keyboard::Key::Character("y") => Some(Message::Redo), // ⌘Y
-                    _ => None,
-                };
+                        iced::keyboard::Key::Character("y") => Some(Message::Redo), // ⌘Y
+                        _ => None,
+                    };
+                }
             }
-        }
-        None
-    })
-}
+            None
+        })
+    }
+
     fn dispatch(&mut self, cmd: Command) {
         self.execute_command(&cmd);
         self.undo_stack.push(cmd);
@@ -525,7 +529,10 @@ fn subscription(&self) -> iced::Subscription<Message> {
                 }
             }
 
-Message::CardDropped(card_id, from_col, point, _rect) => {
+            Message::CardDropped(card_id, from_col, point, _rect) => {
+                // Fix: Hide the card temporarily while calculating the drop
+                self.moving_card = Some(card_id);
+
                 return iced_drop::zones_on_point(
                     move |zones| Message::HandleDropZones(card_id, from_col, zones),
                     point,
@@ -534,6 +541,9 @@ Message::CardDropped(card_id, from_col, point, _rect) => {
                 );
             }
             Message::HandleDropZones(card_id, from_col, zones) => {
+                // Fix: Calculation is over, unhide the card
+                self.moving_card = None;
+
                 if let Some((zone_id, _)) = zones.first() {
                     let to_col = [Col::Todo, Col::InProgress, Col::Done]
                         .iter()
@@ -573,6 +583,7 @@ Message::CardDropped(card_id, from_col, point, _rect) => {
         }
         Task::none()
     }
+
     fn view(&self) -> Element<Message> {
         let theme = &self.theme;
 
@@ -697,6 +708,11 @@ Message::CardDropped(card_id, from_col, point, _rect) => {
 
             let mut cards_ui = Vec::new();
             for kcard in cards {
+                // Fix: Skip drawing this card completely if it's in the middle of a drop calculation!
+                if self.moving_card == Some(kcard.id) {
+                    continue;
+                }
+
                 let cid = kcard.id;
                 let ctitle = kcard.title.clone();
                 let cdesc = kcard.description.clone();
@@ -828,7 +844,7 @@ Message::CardDropped(card_id, from_col, point, _rect) => {
             .spacing(14)
             .width(Length::Fixed(340.0));
 
-        let zone_id = self.col_ids[col_id as usize].clone();
+            let zone_id = self.col_ids[col_id as usize].clone();
             columns_ui.push(
                 container(col_content)
                     .id(zone_id)
@@ -1325,7 +1341,6 @@ struct CalendarProgram {
 }
 
 impl canvas::Program<Message> for CalendarProgram {
-
     type State = ();
 
     fn update(
@@ -1348,7 +1363,6 @@ impl canvas::Program<Message> for CalendarProgram {
             let days_from_sun = self.view_month.weekday().num_days_from_sunday();
             let start_date = self.view_month - Duration::days(days_from_sun as i64);
 
-            // Reconstruct hitboxes
             for row in 0..6 {
                 let week_start = start_date + Duration::days((row * 7) as i64);
                 let week_end = week_start + Duration::days(6);
@@ -1401,7 +1415,6 @@ impl canvas::Program<Message> for CalendarProgram {
                     }
                 }
 
-                // If not hit a pill, check if hit a cell background
                 for col in 0..7 {
                     let cell_date = week_start + Duration::days(col as i64);
                     let x = col_w * (col as f32);
@@ -1586,4 +1599,3 @@ impl canvas::Program<Message> for CalendarProgram {
         }
     }
 }
-
