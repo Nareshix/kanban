@@ -18,6 +18,8 @@ use iced_shadcn::{
 fn main() -> iced::Result {
     iced::application(KanbanApp::new, KanbanApp::update, KanbanApp::view)
         .theme(|_: &KanbanApp| iced::Theme::Dark)
+            .subscription(KanbanApp::subscription)
+
         .window(iced::window::Settings {
             size: Size::new(1200.0, 820.0),
             ..Default::default()
@@ -372,6 +374,32 @@ impl KanbanApp {
         }
     }
 
+fn subscription(&self) -> iced::Subscription<Message> {
+    iced::event::listen_with(|event, _status, _window| {
+        if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key,
+            modifiers,
+            ..
+        }) = event
+        {
+            let cmd = modifiers.control() || modifiers.logo(); // Ctrl on Win/Linux, ⌘ on Mac
+            if cmd {
+                return match key.as_ref() {
+                    iced::keyboard::Key::Character("z") => {
+                        if modifiers.shift() {
+                            Some(Message::Redo)   // ⌘⇧Z
+                        } else {
+                            Some(Message::Undo)   // ⌘Z
+                        }
+                    }
+                    iced::keyboard::Key::Character("y") => Some(Message::Redo), // ⌘Y
+                    _ => None,
+                };
+            }
+        }
+        None
+    })
+}
     fn dispatch(&mut self, cmd: Command) {
         self.execute_command(&cmd);
         self.undo_stack.push(cmd);
